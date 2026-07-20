@@ -488,6 +488,15 @@ def _print_progress(
             msg = msg[: cols - 1] + "…"
     except OSError:
         pass
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        msg.encode(encoding)
+    except UnicodeEncodeError:
+        # Native Windows runners can expose a cp1252 stdout even under Git Bash.
+        # Map status symbols first, then replace any remaining unsupported
+        # characters (for example in a Unicode filename) without losing results.
+        msg = msg.replace("✓", "PASS").replace("✗", "FAIL").replace("…", "...")
+        msg = msg.encode(encoding, errors="replace").decode(encoding)
     print(msg, flush=True)
 
 
@@ -646,6 +655,15 @@ def _slice_files(
 
 
 def main() -> int:
+    if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+        # Failure reports use box-drawing characters too. Keep those paths
+        # non-fatal under cp1252 while _print_progress supplies readable ASCII
+        # PASS/FAIL replacements for its status symbols.
+        try:
+            sys.stdout.reconfigure(errors="replace")
+        except (AttributeError, OSError):
+            pass
+
     parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,

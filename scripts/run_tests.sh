@@ -51,6 +51,11 @@ done
 
 if [ -n "$VENV" ]; then
   PYTHON="$VENV/bin/python"
+elif [ -x "$REPO_ROOT/.venv/Scripts/python.exe" ] \
+    && "$REPO_ROOT/.venv/Scripts/python.exe" -c 'import pytest' 2>/dev/null; then
+  # Native Windows uv/venv layout when the runner is invoked from Git Bash.
+  PYTHON="$REPO_ROOT/.venv/Scripts/python.exe"
+  echo "▶ using native Windows venv: $PYTHON"
 elif [ -n "${HERMES_PYTHON:-}" ] && [ -x "$HERMES_PYTHON" ] \
     && "$HERMES_PYTHON" -c 'import pytest' 2>/dev/null; then
   # Guard with an import check: HERMES_PYTHON may point at the RELEASE
@@ -91,14 +96,59 @@ echo "▶ pre-compiling bytecode cache"
 "$PYTHON" -m compileall -q -j 0 -- $(git ls-files '*.py') >/dev/null 2>&1 || true
 
 echo "▶ launching test runner"
-exec env -i \
-  PATH="$PATH" \
-  HOME="$HOME" \
-  TZ=UTC \
-  LANG=C.UTF-8 \
-  LC_ALL=C.UTF-8 \
-  PYTHONHASHSEED=0 \
-  ${HERMES_RUN_SLOW_PET_TESTS:+HERMES_RUN_SLOW_PET_TESTS="$HERMES_RUN_SLOW_PET_TESTS"} \
-  ${EXTRA_PYTHONPATH:+PYTHONPATH="$EXTRA_PYTHONPATH"} \
-  ${EXTRA_PYTEST_PLUGINS:+PYTEST_PLUGINS="$EXTRA_PYTEST_PLUGINS"} \
+
+WINDOWS_ENV=()
+TEST_PROFILE_ROOT=""
+cleanup_test_profile() {
+  if [ -n "$TEST_PROFILE_ROOT" ] && [ -d "$TEST_PROFILE_ROOT" ]; then
+    rm -rf -- "$TEST_PROFILE_ROOT"
+    TEST_PROFILE_ROOT=""
+  fi
+}
+
+if [ "$("$PYTHON" -c 'import sys; print("1" if sys.platform == "win32" else "0")')" = "1" ]; then
+  TEST_PROFILE_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/hermes-tests.XXXXXX")"
+  trap cleanup_test_profile EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  mkdir -p "$TEST_PROFILE_ROOT/AppData/Local" "$TEST_PROFILE_ROOT/.hermes"
+  TEST_PROFILE_NATIVE="$(cygpath -w "$TEST_PROFILE_ROOT")"
+  WINDOWS_ENV=(
+    "USERPROFILE=$TEST_PROFILE_NATIVE"
+    "LOCALAPPDATA=$TEST_PROFILE_NATIVE\\AppData\\Local"
+    "HERMES_HOME=$TEST_PROFILE_NATIVE\\.hermes"
+    "SYSTEMROOT=${SYSTEMROOT:-C:\\Windows}"
+    "WINDIR=${WINDIR:-${SYSTEMROOT:-C:\\Windows}}"
+    "COMSPEC=${COMSPEC:-C:\\Windows\\System32\\cmd.exe}"
+  )
+fi
+
+RUNNER_ENV=(
+  "PATH=$PATH"
+  "HOME=${TEST_PROFILE_ROOT:-$HOME}"
+  "TZ=UTC"
+  "LANG=C.UTF-8"
+  "LC_ALL=C.UTF-8"
+  "PYTHONHASHSEED=0"
+)
+if [ -n "${HERMES_RUN_SLOW_PET_TESTS:-}" ]; then
+  RUNNER_ENV+=("HERMES_RUN_SLOW_PET_TESTS=$HERMES_RUN_SLOW_PET_TESTS")
+fi
+if [ -n "$EXTRA_PYTHONPATH" ]; then
+  RUNNER_ENV+=("PYTHONPATH=$EXTRA_PYTHONPATH")
+fi
+if [ -n "$EXTRA_PYTEST_PLUGINS" ]; then
+  RUNNER_ENV+=("PYTEST_PLUGINS=$EXTRA_PYTEST_PLUGINS")
+fi
+
+if [ -z "$TEST_PROFILE_ROOT" ]; then
+  exec env -i "${RUNNER_ENV[@]}" \
+    "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+fi
+
+set +e
+env -i "${RUNNER_ENV[@]}" "${WINDOWS_ENV[@]}" \
   "$PYTHON" "$SCRIPT_DIR/run_tests_parallel.py" "$@"
+STATUS=$?
+set -e
+exit "$STATUS"
