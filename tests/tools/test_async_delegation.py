@@ -624,11 +624,8 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     assert _drain_one() is None
 
 
-def test_model_dispatch_forces_background():
-    """The MODEL-facing dispatch path forces background=True for any top-level
-    delegation (single task OR batch), and keeps it off for an orchestrator
-    subagent (depth > 0). Direct delegate_task() callers are unaffected (they
-    keep the synchronous default)."""
+def test_model_dispatch_forces_background(monkeypatch):
+    """Top-level chat detaches; subagents and Kanban workers stay synchronous."""
     import tools.delegate_tool as dt
     from unittest.mock import MagicMock
 
@@ -636,6 +633,8 @@ def test_model_dispatch_forces_background():
     top._delegate_depth = 0
     sub = MagicMock()
     sub._delegate_depth = 1
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
 
     # Registry-fallback helper: top-level always background, regardless of
     # single vs batch; subagent never.
@@ -649,11 +648,17 @@ def test_model_dispatch_forces_background():
         {"tasks": [{"goal": "a"}, {"goal": "b"}]}, sub
     ) is False
 
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_review")
+    assert dt._model_background_value({"goal": "review"}, top) is False
+    assert "KANBAN WORKER MODE" in dt._build_top_level_description()
+    assert "SYNCHRONOUSLY" in dt._build_top_level_description()
+    assert dt._model_background_value(
+        {"tasks": [{"goal": "a"}, {"goal": "b"}]}, top
+    ) is False
 
-def test_run_agent_dispatch_forces_background():
-    """run_agent._dispatch_delegate_task — the live model path — forces
-    background on for any top-level delegation (single OR batch) and off for a
-    subagent."""
+
+def test_run_agent_dispatch_forces_background(monkeypatch):
+    """The live dispatch path mirrors chat/subagent/Kanban lifecycle policy."""
     from unittest.mock import patch
     import run_agent
 
@@ -667,6 +672,7 @@ def test_run_agent_dispatch_forces_background():
         return "{}"
 
     with patch("tools.delegate_tool.delegate_task", _fake_delegate):
+        monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
         agent = _FakeAgent()
         run_agent.AIAgent._dispatch_delegate_task(agent, {"goal": "x"})
         assert captured["background"] is True
@@ -680,6 +686,13 @@ def test_run_agent_dispatch_forces_background():
         sub._delegate_depth = 1
         run_agent.AIAgent._dispatch_delegate_task(sub, {"goal": "x"})
         assert captured["background"] is False
+
+        monkeypatch.setenv("HERMES_KANBAN_TASK", "t_review")
+        run_agent.AIAgent._dispatch_delegate_task(
+            agent, {"goal": "review", "review": True}
+        )
+        assert captured["background"] is False
+        assert captured["review"] is True
 
 
 def test_dispatch_never_forwards_model_toolsets():

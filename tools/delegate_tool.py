@@ -4,8 +4,9 @@ Delegate Tool -- Subagent Architecture
 
 Spawns child AIAgent instances with isolated context, inherited toolsets,
 and their own terminal sessions. Supports single-task and batch (parallel)
-modes. Top-level model calls run in the background; orchestrator children
-wait for their own workers so they can synthesize the results.
+modes. Normal top-level model calls run in the background; orchestrator children
+and dispatcher-spawned Kanban workers wait for their own workers so they can
+consume results before their bounded lifecycle ends.
 
 Each child gets:
   - A fresh conversation (no parent history)
@@ -1140,13 +1141,16 @@ def _build_child_agent(
     else:
         parent_toolsets = set(DEFAULT_TOOLSETS)
 
+    review_readonly = toolsets == ["review_readonly"]
     if toolsets:
         # Intersect with parent — subagent must not gain tools the parent lacks.
         # Expand composite toolsets (e.g. hermes-cli) so that individual
         # toolset names (e.g. web, terminal) are recognised during intersection.
         expanded_parent = _expand_parent_toolsets(parent_toolsets)
         child_toolsets = [t for t in toolsets if t in expanded_parent]
-        if _get_inherit_mcp_toolsets():
+        # Enforced review mode must stay exact: inherited MCP toolsets can be
+        # side-effecting and would also become reachable through tool_search.
+        if not review_readonly and _get_inherit_mcp_toolsets():
             child_toolsets = _preserve_parent_mcp_toolsets(
                 child_toolsets, parent_toolsets
             )
@@ -1179,6 +1183,11 @@ def _build_child_agent(
             inherited_disabled + _blocked_toolsets_for_role(effective_role)
         )
     )
+    if review_readonly and "kanban" not in child_disabled_toolsets:
+        # model_tools auto-enables the Kanban lifecycle toolset whenever the
+        # process carries HERMES_KANBAN_TASK. A review child shares that process
+        # but must not mutate durable task state.
+        child_disabled_toolsets.append("kanban")
 
     # Orchestrators retain the 'delegation' toolset that _strip_blocked_tools
     # removed.  The re-add is unconditional on parent-toolset membership because
@@ -2429,6 +2438,7 @@ def delegate_task(
     tasks: Optional[List[Dict[str, Any]]] = None,
     max_iterations: Optional[int] = None,
     role: Optional[str] = None,
+    review: bool = False,
     background: Optional[bool] = None,
     parent_agent=None,
 ) -> str:
@@ -2443,6 +2453,8 @@ def delegate_task(
     'leaf' (default) cannot; 'orchestrator' retains the delegation
     toolset and can spawn its own workers, bounded by
     delegation.max_spawn_depth.  Per-task role beats the top-level one.
+
+    ``review=True`` restricts every child to read-only file/search tools.
 
     Returns JSON with results array, one entry per task.
     """
@@ -2532,7 +2544,14 @@ def delegate_task(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        task_list = [{"goal": goal, "context": context, "role": top_role}]
+        task_list = [
+            {
+                "goal": goal,
+                "context": context,
+                "role": top_role,
+                "review": bool(review),
+            }
+        ]
     else:
         return tool_error("Provide either 'goal' (single task) or 'tasks' (batch).")
 
@@ -2568,16 +2587,21 @@ def delegate_task(
     children = []
     try:
         for i, t in enumerate(task_list):
-            # Per-task role beats top-level; normalise again so unknown
-            # per-task values warn and degrade to leaf uniformly.
-            effective_role = _normalize_role(t.get("role") or top_role)
+            review_mode = bool(t.get("review", review))
+            # Review mode is always a leaf: role='orchestrator' must not re-add
+            # delegate_task to the enforced read-only capability set.
+            effective_role = (
+                "leaf"
+                if review_mode
+                else _normalize_role(t.get("role") or top_role)
+            )
             child = _build_child_agent(
                 task_index=i,
                 goal=t["goal"],
                 context=t.get("context"),
-                # Subagents always inherit the parent's toolsets; the model
-                # cannot choose or narrow them (no model-facing toolsets arg).
-                toolsets=None,
+                # Review children are technically read-only; normal children
+                # inherit the parent's toolsets as before.
+                toolsets=["review_readonly"] if review_mode else None,
                 model=creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
@@ -3314,6 +3338,23 @@ def _build_top_level_description() -> str:
             f"config.yaml to enable nesting."
         )
 
+    if os.environ.get("HERMES_KANBAN_TASK"):
+        execution_clause = (
+            "KANBAN WORKER MODE: single and batch delegations run "
+            "SYNCHRONOUSLY. The consolidated result is returned in this tool "
+            "response so the worker can act on review findings before completing "
+            "or blocking its card."
+        )
+    else:
+        execution_clause = (
+            "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
+            "you and the user keep working, and the completed result re-enters "
+            "the conversation as a new message. A batch returns one handle, runs "
+            "N subagents concurrently, and delivers one consolidated result after "
+            "ALL of them finish. Do NOT wait or poll; just continue with other "
+            "work after dispatching."
+        )
+
     return (
         "Spawn one or more subagents to work on tasks in isolated contexts. "
         "Each subagent gets its own conversation, terminal session, and toolset. "
@@ -3324,12 +3365,7 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
-        "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
-        "you and the user keep working, and the completed result re-enters "
-        "the conversation as a new message. A "
-        "batch returns one handle, runs N subagents concurrently, and delivers "
-        "one consolidated result after ALL of them finish. Do NOT wait or poll; "
-        "just continue with other work after dispatching.\n\n"
+        f"{execution_clause}\n\n"
         "WHEN TO USE delegate_task:\n"
         "- Reasoning-heavy subtasks (debugging, code review, research synthesis)\n"
         "- Tasks that would flood your context with intermediate data\n"
@@ -3369,7 +3405,9 @@ def _build_top_level_description() -> str:
         "delegation.orchestrator_enabled=false.\n"
         "- Subagent model is NOT selectable per call: children inherit the parent model (plus its fallback chain) unless you pin all subagents to a model via delegation.provider / delegation.model in config.yaml.\n"
         "- Each subagent gets its own terminal session (separate working directory and state).\n"
-        "- Results are always returned as an array, one entry per task."
+        "- Pass review=true for an enforced read-only reviewer with only "
+        "read_file and search_files. Results are always returned as an array, "
+        "one entry per task."
     )
 
 
@@ -3496,6 +3534,13 @@ DELEGATE_TASK_SCHEMA = {
                             "enum": ["leaf", "orchestrator"],
                             "description": "Per-task role override. See top-level 'role' for semantics.",
                         },
+                        "review": {
+                            "type": "boolean",
+                            "description": (
+                                "Run this child with enforced read-only review "
+                                "tools (read_file and search_files only)."
+                            ),
+                        },
                     },
                     "required": ["goal"],
                 },
@@ -3509,16 +3554,21 @@ DELEGATE_TASK_SCHEMA = {
                 "enum": ["leaf", "orchestrator"],
                 "description": "(rebuilt at get_definitions() time)",
             },
+            "review": {
+                "type": "boolean",
+                "description": (
+                    "Run as an enforced read-only reviewer with only read_file "
+                    "and search_files. For batch mode this is the default for "
+                    "tasks that do not set their own review value."
+                ),
+            },
             "background": {
                 "type": "boolean",
                 "description": (
-                    "DEPRECATED / IGNORED. Top-level single and batch "
-                    "delegations run in the background automatically — you do "
-                    "not need to (and cannot) opt in or out. A single result or "
-                    "consolidated batch result re-enters the conversation when "
-                    "the work finishes; just continue working in the meantime. "
-                    "Setting this has no effect; the parameter remains only for "
-                    "backward compatibility."
+                    "DEPRECATED / IGNORED. Normal top-level sessions delegate "
+                    "asynchronously; nested subagents and dispatcher-spawned "
+                    "Kanban workers delegate synchronously so they can consume "
+                    "the result before their bounded lifecycle ends."
                 ),
             },
         },
@@ -3532,20 +3582,17 @@ from tools.registry import registry, tool_error
 
 
 def _model_background_value(args: dict, parent_agent=None) -> bool:
-    """Background flag for the MODEL-facing dispatch path (registry fallback).
+    """Return whether a model-facing delegation should detach.
 
-    Delegations from the top-level agent always run in the background — the
-    model does not choose. This applies to both a single task and a fan-out
-    batch (the whole batch is one async unit that joins on all children and
-    returns one consolidated result). The one
-    exception is a delegation from an orchestrator subagent (depth > 0), which
-    needs its workers' results within its own turn. The live path is
-    ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare
-    case the intercept is bypassed. Direct Python callers of ``delegate_task``
-    keep the historical synchronous default.
+    Normal top-level sessions always delegate in the background. Nested
+    orchestrator subagents and dispatcher-spawned Kanban workers must consume
+    child results within their own bounded lifecycle, so they run synchronously.
+    Direct Python callers of ``delegate_task`` keep the historical synchronous
+    default.
     """
     is_subagent = getattr(parent_agent, "_delegate_depth", 0) > 0
-    return not is_subagent
+    is_kanban_worker = bool(os.environ.get("HERMES_KANBAN_TASK"))
+    return not (is_subagent or is_kanban_worker)
 
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}
@@ -3580,6 +3627,7 @@ registry.register(
         tasks=_strip_model_hidden_task_fields(args.get("tasks")),
         max_iterations=args.get("max_iterations"),
         role=args.get("role"),
+        review=bool(args.get("review", False)),
         background=_model_background_value(args, kw.get("parent_agent")),
         parent_agent=kw.get("parent_agent"),
     ),

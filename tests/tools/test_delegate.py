@@ -71,9 +71,10 @@ class TestDelegateRequirements(unittest.TestCase):
         self.assertIn("goal", props)
         self.assertIn("tasks", props)
         self.assertIn("context", props)
-        # toolsets is intentionally NOT exposed to the model — subagents always
-        # inherit the parent's toolsets. Letting the model name toolsets was a
-        # capability-selection surface the model should not control.
+        self.assertIn("review", props)
+        self.assertIn("review", props["tasks"]["items"]["properties"])
+        # Arbitrary toolsets remain unavailable to the model. The boolean review
+        # contract selects one fixed read-only toolset; it cannot grant tools.
         self.assertNotIn("toolsets", props)
         self.assertNotIn("toolsets", props["tasks"]["items"]["properties"])
         # max_iterations is intentionally NOT exposed to the model — it's
@@ -249,6 +250,43 @@ class TestStripBlockedTools(unittest.TestCase):
         names = {item["function"]["name"] for item in definitions}
         self.assertTrue(names & {"terminal", "read_file", "web_search"})
         self.assertTrue(DELEGATE_BLOCKED_TOOLS.isdisjoint(names))
+
+    def test_review_toolset_is_enforced_read_only(self):
+        import model_tools
+
+        parent = _make_mock_parent()
+        parent.enabled_toolsets = ["hermes-cli", "mcp-dangerous-writer"]
+
+        with (
+            patch("run_agent.AIAgent") as MockAgent,
+            patch("tools.delegate_tool._get_inherit_mcp_toolsets", return_value=True),
+            patch.dict(os.environ, {"HERMES_KANBAN_TASK": "t_review"}),
+        ):
+            MockAgent.return_value = MagicMock()
+            _build_child_agent(
+                task_index=0,
+                goal="Review without edits",
+                context=None,
+                toolsets=["review_readonly"],
+                model=None,
+                max_iterations=10,
+                parent_agent=parent,
+                task_count=1,
+                role="leaf",
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["enabled_toolsets"], ["review_readonly"])
+        definitions = model_tools.get_tool_definitions(
+            enabled_toolsets=kwargs["enabled_toolsets"],
+            disabled_toolsets=kwargs["disabled_toolsets"],
+            quiet_mode=True,
+        )
+        names = {item["function"]["name"] for item in definitions}
+        self.assertEqual(names, {"read_file", "search_files"})
+        self.assertTrue(
+            {"tool_search", "tool_describe", "tool_call"}.isdisjoint(names)
+        )
 
     def test_orchestrator_composite_regains_only_delegate_task(self):
         import model_tools
@@ -572,6 +610,33 @@ class TestToolNamePreservation(unittest.TestCase):
             delegate_task(goal="Test tool preservation", parent_agent=parent)
 
         self.assertEqual(model_tools._last_resolved_tool_names, original_tools)
+
+    def test_review_mode_builds_read_only_child(self):
+        parent = _make_mock_parent(depth=0)
+        parent.enabled_toolsets = ["hermes-cli"]
+
+        with patch("run_agent.AIAgent") as MockAgent:
+            mock_child = MagicMock()
+            mock_child.run_conversation.return_value = {
+                "final_response": "GO",
+                "completed": True,
+                "api_calls": 1,
+            }
+            MockAgent.return_value = mock_child
+
+            result = json.loads(
+                delegate_task(
+                    goal="Review the change",
+                    review=True,
+                    role="orchestrator",
+                    parent_agent=parent,
+                )
+            )
+
+        _, kwargs = MockAgent.call_args
+        self.assertEqual(kwargs["enabled_toolsets"], ["review_readonly"])
+        self.assertEqual(mock_child._delegate_role, "leaf")
+        self.assertEqual(result["results"][0]["summary"], "GO")
 
     def test_global_tool_names_restored_after_child_failure(self):
         """Even when the child agent raises, the global must be restored."""
