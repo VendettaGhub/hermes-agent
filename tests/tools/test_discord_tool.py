@@ -214,6 +214,14 @@ class TestDiscordServerValidation:
         assert "error" in result
         assert "message_id" in result["error"]
 
+    def test_missing_required_content_for_edit(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="500",
+        ))
+        assert "error" in result
+        assert "content" in result["error"]
+
     def test_missing_multiple_params(self, monkeypatch):
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
         result = json.loads(discord_admin_handler(action="add_role"))
@@ -446,7 +454,7 @@ class TestListPins:
 
 
 # ---------------------------------------------------------------------------
-# Actions: pin_message / unpin_message / delete_message
+# Actions: pin_message / unpin_message / delete_message / edit_message
 # ---------------------------------------------------------------------------
 
 class TestPinUnpinDelete:
@@ -467,13 +475,64 @@ class TestPinUnpinDelete:
         mock_req.assert_called_once_with("DELETE", "/channels/11/pins/500", "test-token")
 
     @patch("tools.discord_tool._discord_request")
-    def test_delete_message(self, mock_req, monkeypatch):
+    def test_delete_own_message(self, mock_req, monkeypatch):
         monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
-        mock_req.return_value = None
+        mock_req.side_effect = [
+            {"id": "500", "author": {"id": "42"}},
+            {"id": "42"},
+            None,
+        ]
         result = json.loads(discord_admin_handler(action="delete_message", channel_id="11", message_id="500"))
         assert result["success"] is True
         assert "deleted" in result["message"]
-        mock_req.assert_called_once_with("DELETE", "/channels/11/messages/500", "test-token")
+        assert mock_req.call_args_list == [
+            (("GET", "/channels/11/messages/500", "test-token"),),
+            (("GET", "/users/@me", "test-token"),),
+            (("DELETE", "/channels/11/messages/500", "test-token"),),
+        ]
+
+    @patch("tools.discord_tool._discord_request")
+    def test_delete_foreign_message_does_not_mutate(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.side_effect = [
+            {"id": "500", "author": {"id": "99"}},
+            {"id": "42"},
+        ]
+        result = json.loads(discord_admin_handler(action="delete_message", channel_id="11", message_id="500"))
+        assert "error" in result
+        assert "own messages" in result["error"]
+        assert all(call.args[0] != "DELETE" for call in mock_req.call_args_list)
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_own_message(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.side_effect = [
+            {"id": "500", "author": {"id": "42"}},
+            {"id": "42"},
+            {"id": "500", "content": "updated"},
+        ]
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="500", content="updated",
+        ))
+        assert result["success"] is True
+        assert mock_req.call_args_list[-1] == (
+            ("PATCH", "/channels/11/messages/500", "test-token"),
+            {"body": {"content": "updated"}},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_edit_foreign_message_does_not_mutate(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.side_effect = [
+            {"id": "500", "author": {"id": "99"}},
+            {"id": "42"},
+        ]
+        result = json.loads(discord_admin_handler(
+            action="edit_message", channel_id="11", message_id="500", content="updated",
+        ))
+        assert "error" in result
+        assert "own messages" in result["error"]
+        assert all(call.args[0] != "PATCH" for call in mock_req.call_args_list)
 
 
 # ---------------------------------------------------------------------------
@@ -636,9 +695,33 @@ class TestRegistration:
         assert "list_guilds()" in desc
         assert "add_role(guild_id, user_id, role_id)" in desc
         assert "delete_message(channel_id, message_id)" in desc
+        assert "edit_message(channel_id, message_id, content)" in desc
         # Core actions should NOT be in admin description
         assert "fetch_messages(" not in desc
         assert "create_thread(" not in desc
+
+    def test_edit_message_schema_and_registry_forwarding(self, monkeypatch):
+        from tools.registry import registry
+        entry = registry._tools["discord_admin"]
+        props = entry.schema["parameters"]["properties"]
+        assert "edit_message" in props["action"]["enum"]
+        assert props["content"]["type"] == "string"
+
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        with patch("tools.discord_tool._discord_request") as mock_req:
+            mock_req.side_effect = [
+                {"id": "500", "author": {"id": "42"}},
+                {"id": "42"},
+                {"id": "500", "content": "updated"},
+            ]
+            result = json.loads(entry.handler({
+                "action": "edit_message",
+                "channel_id": "11",
+                "message_id": "500",
+                "content": "updated",
+            }))
+        assert result["success"] is True
+        assert mock_req.call_args_list[-1].kwargs == {"body": {"content": "updated"}}
 
     def test_handler_callable(self):
         from tools.registry import registry

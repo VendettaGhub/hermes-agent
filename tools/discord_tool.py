@@ -578,10 +578,34 @@ def _unpin_message(token: str, channel_id: str, message_id: str, **_kwargs: Any)
     return json.dumps({"success": True, "message": f"Message {message_id} unpinned."})
 
 
+def _message_owned_by_bot(token: str, channel_id: str, message_id: str) -> bool:
+    """Return whether the target message was authored by this bot."""
+    message = _discord_request("GET", f"/channels/{channel_id}/messages/{message_id}", token)
+    bot = _discord_request("GET", "/users/@me", token)
+    author_id = message.get("author", {}).get("id")
+    bot_id = bot.get("id")
+    return bool(bot_id and author_id == bot_id)
+
+
 def _delete_message(token: str, channel_id: str, message_id: str, **_kwargs: Any) -> str:
     """Delete a message from a channel or thread."""
+    if not _message_owned_by_bot(token, channel_id, message_id):
+        return json.dumps({"error": "The bot can only delete its own messages."})
     _discord_request("DELETE", f"/channels/{channel_id}/messages/{message_id}", token)
     return json.dumps({"success": True, "message": f"Message {message_id} deleted."})
+
+
+def _edit_message(
+    token: str, channel_id: str, message_id: str, content: str, **_kwargs: Any,
+) -> str:
+    """Edit a message authored by this bot."""
+    if not _message_owned_by_bot(token, channel_id, message_id):
+        return json.dumps({"error": "The bot can only edit its own messages."})
+    _discord_request(
+        "PATCH", f"/channels/{channel_id}/messages/{message_id}", token,
+        body={"content": content},
+    )
+    return json.dumps({"success": True, "message": f"Message {message_id} edited."})
 
 
 def _create_thread(
@@ -643,6 +667,7 @@ _ACTIONS = {
     "pin_message": _pin_message,
     "unpin_message": _unpin_message,
     "delete_message": _delete_message,
+    "edit_message": _edit_message,
     "create_thread": _create_thread,
     "add_role": _add_role,
     "remove_role": _remove_role,
@@ -670,6 +695,7 @@ _ACTION_MANIFEST: List[Tuple[str, str, str]] = [
     ("pin_message", "(channel_id, message_id)", "pin a message"),
     ("unpin_message", "(channel_id, message_id)", "unpin a message"),
     ("delete_message", "(channel_id, message_id)", "delete a message"),
+    ("edit_message", "(channel_id, message_id, content)", "edit a message"),
     ("create_thread", "(channel_id, name)", "create a public thread; optional message_id anchor"),
     ("add_role", "(guild_id, user_id, role_id)", "assign a role"),
     ("remove_role", "(guild_id, user_id, role_id)", "remove a role"),
@@ -691,6 +717,7 @@ _REQUIRED_PARAMS: Dict[str, List[str]] = {
     "pin_message": ["channel_id", "message_id"],
     "unpin_message": ["channel_id", "message_id"],
     "delete_message": ["channel_id", "message_id"],
+    "edit_message": ["channel_id", "message_id", "content"],
     "create_thread": ["channel_id", "name"],
     "add_role": ["guild_id", "user_id", "role_id"],
     "remove_role": ["guild_id", "user_id", "role_id"],
@@ -845,6 +872,10 @@ def _build_schema(
             "type": "string",
             "description": "Discord message ID.",
         },
+        "content": {
+            "type": "string",
+            "description": "New message content (edit_message).",
+        },
         "query": {
             "type": "string",
             "description": "Member name prefix to search for (search_members).",
@@ -993,6 +1024,7 @@ def _run_discord_action(
     user_id: str = "",
     role_id: str = "",
     message_id: str = "",
+    content: str = "",
     query: str = "",
     name: str = "",
     limit: int = 50,
@@ -1030,6 +1062,7 @@ def _run_discord_action(
         "user_id": user_id,
         "role_id": role_id,
         "message_id": message_id,
+        "content": content,
         "query": query,
         "name": name,
     }
@@ -1048,6 +1081,7 @@ def _run_discord_action(
             user_id=user_id,
             role_id=role_id,
             message_id=message_id,
+            content=content,
             query=query,
             name=name,
             limit=limit,
@@ -1081,7 +1115,7 @@ def discord_admin_handler(action: str, **kwargs) -> str:
 
 _HANDLER_DEFAULTS = {
     "action": "", "guild_id": "", "channel_id": "", "user_id": "",
-    "role_id": "", "message_id": "", "query": "", "name": "",
+    "role_id": "", "message_id": "", "content": "", "query": "", "name": "",
     "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
 }
 
