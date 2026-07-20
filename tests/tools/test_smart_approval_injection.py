@@ -14,10 +14,17 @@ Defenses under test:
 import unittest
 from unittest.mock import MagicMock, patch
 
+import tools.approval as approval_module
 from tools.approval import (
     _strip_line_comment,
     _strip_shell_comments,
     _smart_approve,
+    _smart_review,
+    check_dangerous_command,
+    clear_session,
+    reset_current_session_key,
+    set_current_approval_intent,
+    set_current_session_key,
 )
 
 
@@ -204,6 +211,65 @@ class TestSmartApprovePromptHardening(unittest.TestCase):
         """Unrecognizable LLM output must default to escalate (fail safe)."""
         mock_call_llm.return_value = self._make_response("I think this is probably fine")
         assert _smart_approve("rm -rf /", "recursive delete") == "escalate"
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_intent_context_is_bounded_and_fenced(self, mock_call_llm):
+        mock_call_llm.return_value = self._make_response(
+            '{"decision":"REVISE","reason":"Use a local verification instead."}'
+        )
+        set_current_approval_intent(
+            user_prompt="Please verify locally; do not publish. " + ("x" * 10000),
+            recent_context="Earlier context",
+            cwd="C:/work/project",
+            tool_name="terminal",
+        )
+
+        review = _smart_review("git push origin main", "remote publication")
+        user_content = self._messages_from(mock_call_llm)[1]["content"]
+
+        assert review == {
+            "decision": "revise",
+            "reason": "Use a local verification instead.",
+        }
+        assert "<intent_context>" in user_content
+        assert "Please verify locally; do not publish." in user_content
+        assert "C:/work/project" in user_content
+        assert len(user_content) < 8000
+
+    @patch("agent.auxiliary_client.call_llm")
+    def test_malformed_structured_response_escalates(self, mock_call_llm):
+        mock_call_llm.return_value = self._make_response(
+            '{"decision":"REVISE","reason":42}'
+        )
+        assert _smart_review("git push", "remote publication")["decision"] == "escalate"
+
+
+class TestSmartRevisionRoundLimit(unittest.TestCase):
+    def test_revise_once_then_falls_through_to_user_approval(self):
+        session_key = "smart-revision-test"
+        token = set_current_session_key(session_key)
+        clear_session(session_key)
+        try:
+            review = {"decision": "revise", "reason": "Use a safer local check."}
+            with (
+                patch.object(approval_module, "_get_approval_mode", return_value="smart"),
+                patch.object(approval_module, "_smart_review", return_value=review),
+                patch.object(approval_module, "_is_gateway_approval_context", return_value=True),
+            ):
+                first = check_dangerous_command(
+                    'python -c "print(1)"', "local", has_host_access=True
+                )
+                second = check_dangerous_command(
+                    'python -c "print(2)"', "local", has_host_access=True
+                )
+
+            assert first["smart_revision_requested"] is True
+            assert first["message"].startswith("REVISE before asking the user:")
+            assert second["status"] == "approval_required"
+            assert "Asking the user for approval" in second["message"]
+        finally:
+            clear_session(session_key)
+            reset_current_session_key(token)
 
 
 if __name__ == "__main__":

@@ -74,7 +74,7 @@ class TestSmartApproval:
         mock_call.assert_called_once()
         assert mock_call.call_args.kwargs["task"] == "approval"
         assert mock_call.call_args.kwargs["temperature"] == 0
-        assert mock_call.call_args.kwargs["max_tokens"] == 16
+        assert mock_call.call_args.kwargs["max_tokens"] == 192
 
     def test_smart_approval_does_not_allowlist_the_pattern_for_session(self, monkeypatch):
         session_key = "test-smart-per-command"
@@ -91,7 +91,11 @@ class TestSmartApproval:
             lambda: {"mode": "smart"},
         )
         monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
-        monkeypatch.setattr(approval_module, "_smart_approve", lambda *_: "approve")
+        monkeypatch.setattr(
+            approval_module,
+            "_smart_review",
+            lambda *_: {"decision": "approve", "reason": ""},
+        )
         monkeypatch.setattr(
             "tools.tirith_security.check_command_security",
             lambda _command: {"action": "allow", "findings": [], "summary": ""},

@@ -324,6 +324,36 @@ def _run_agent_tool_execution_middleware(
     return result, observed_args
 
 
+def _bind_approval_intent(messages: list, function_name: str, function_args: dict) -> None:
+    """Expose a small transcript window to smart approval as untrusted data."""
+    from tools.approval import set_current_approval_intent
+
+    snippets = []
+    latest_user = ""
+    for message in reversed(messages or []):
+        if not isinstance(message, dict):
+            continue
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = content.strip()
+        if not text:
+            continue
+        if role == "user" and not latest_user:
+            latest_user = text
+        snippets.append(f"{role}: {text}")
+        if len(snippets) >= 4:
+            break
+    snippets.reverse()
+    set_current_approval_intent(
+        user_prompt=latest_user,
+        recent_context="\n".join(snippets),
+        cwd=str(function_args.get("workdir") or os.getcwd()),
+        tool_name=function_name,
+    )
+
+
 def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0, *, finalize: bool = True) -> None:
     """Execute multiple tool calls concurrently using a thread pool.
 
@@ -340,6 +370,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
     # Resolve the context-scaled tool-output budget once per turn (cheap, but
     # avoids rebuilding it per result inside the loop below).
     _tool_budget = _budget_for_agent(agent)
+    _bind_approval_intent(messages, "concurrent tools", {})
 
     # ── Pre-flight: interrupt check ──────────────────────────────────
     if agent._interrupt_requested:
@@ -1077,6 +1108,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             )
             agent._apply_pending_steer_to_tool_results(messages, 1)
             continue
+        _bind_approval_intent(messages, function_name, function_args)
 
         # Tool Search unwrap — see execute_tool_calls_concurrent for full
         # rationale, including the scope gate (the unwrap dispatches the
