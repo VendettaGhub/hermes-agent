@@ -94,6 +94,9 @@ Per-board isolation is absolute:
 # See what's on disk. Fresh installs show only "default".
 hermes kanban boards list
 
+# Include technical delegate_task history boards when diagnosing a delegation.
+hermes kanban boards list --include-system
+
 # Create a new board.
 hermes kanban boards create atm10-server \
     --name "ATM10 Server" \
@@ -145,6 +148,9 @@ matters.
   the browser's `localStorage` so it persists across reloads without
   shifting the CLI's `current` pointer out from under a terminal you left
   open.
+- **Show delegations** — technical `delegate_task` history boards are hidden
+  from the normal project picker by default. Use this button to inspect them;
+  hiding them again does not delete their tasks or audit history.
 - **+ New board** — opens a modal asking for slug, display name,
   description, and icon. Option to auto-switch to the new board.
 - **Settings** — opens a modal for editing the current board's display

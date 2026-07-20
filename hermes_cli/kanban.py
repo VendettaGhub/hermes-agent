@@ -248,6 +248,10 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
     b_list.add_argument("--json", action="store_true")
     b_list.add_argument("--all", action="store_true",
                         help="Include archived boards too")
+    b_list.add_argument(
+        "--include-system", action="store_true",
+        help="Include technical runtime boards such as delegation traces",
+    )
 
     b_create = boards_sub.add_parser(
         "create", aliases=["new"],
@@ -1077,6 +1081,8 @@ def _board_task_counts(slug: str) -> dict[str, int]:
 def _cmd_boards_list(args: argparse.Namespace) -> int:
     include_archived = bool(getattr(args, "all", False))
     boards = kb.list_boards(include_archived=include_archived)
+    if not bool(getattr(args, "include_system", False)):
+        boards = [b for b in boards if not b.get("system", False)]
     # Enrich each entry with task counts + whether it's the current board.
     current = kb.get_current_board()
     for b in boards:

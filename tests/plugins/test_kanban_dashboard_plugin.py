@@ -138,6 +138,34 @@ def test_board_list_recommends_persistent_workspace_for_configured_workdir(
     assert boards["disposable"]["default_workspace_kind"] == "scratch"
 
 
+def test_board_list_hides_delegation_boards_unless_requested(client):
+    """Technical delegation history must not crowd the project picker."""
+    kb.create_board("project-board")
+    kb.create_board("delegation-abcdef123456")
+    kb.create_board("delegation-not-a-runtime-id")
+
+    response = client.get("/api/plugins/kanban/boards")
+
+    assert response.status_code == 200
+    data = response.json()
+    boards = {board["slug"]: board for board in data["boards"]}
+    assert "project-board" in boards
+    assert "delegation-not-a-runtime-id" in boards
+    assert "delegation-abcdef123456" not in boards
+    assert data["hidden_system_count"] == 1
+
+    response = client.get(
+        "/api/plugins/kanban/boards", params={"include_system": True}
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    boards = {board["slug"]: board for board in data["boards"]}
+    assert boards["delegation-abcdef123456"]["system"] is True
+    assert boards["project-board"]["system"] is False
+    assert data["hidden_system_count"] == 0
+
+
 def test_create_board_persists_project_directory(client, tmp_path):
     """The dashboard board form should anchor future tasks to its project."""
     project_dir = tmp_path / "project"

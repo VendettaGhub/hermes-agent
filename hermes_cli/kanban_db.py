@@ -136,6 +136,18 @@ VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 KNOWN_TOOLSET_NAMES = frozenset(name.casefold() for name in get_toolset_names())
 _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024
+_DELEGATION_BOARD_SLUG_RE = re.compile(r"^delegation-[0-9a-f]{12}$")
+
+
+def is_system_board_slug(slug: str) -> bool:
+    """Return whether ``slug`` identifies a runtime-owned technical board.
+
+    Delegation tracing currently materializes one board per ``delegate_task``
+    call. Match the complete generated shape rather than the broad
+    ``delegation-`` prefix so a user-created project such as
+    ``delegation-platform`` remains visible.
+    """
+    return bool(_DELEGATION_BOARD_SLUG_RE.fullmatch(str(slug).casefold()))
 
 
 def _fire_kanban_lifecycle_hook(event: str, task_id: str, **fields: Any) -> None:
@@ -662,6 +674,11 @@ def read_board_metadata(board: Optional[str] = None) -> dict:
                 meta.update(raw)
     except (OSError, json.JSONDecodeError):
         pass
+    # Runtime-owned boards remain first-class at the storage/dispatcher layer,
+    # but presentation surfaces can keep them out of normal project pickers.
+    # Derive this field from the immutable slug so stale/missing board.json
+    # files and user-edited metadata cannot misclassify a board.
+    meta["system"] = is_system_board_slug(slug)
     meta["db_path"] = str(kanban_db_path(slug))
     return meta
 
@@ -686,6 +703,7 @@ def write_board_metadata(
     # Preserve existing DB-derived fields — they get re-computed each
     # read but shouldn't be written into board.json.
     meta.pop("db_path", None)
+    meta.pop("system", None)
     if name is not None:
         meta["name"] = str(name).strip() or _default_board_display_name(slug)
     if description is not None:
@@ -706,6 +724,7 @@ def write_board_metadata(
         json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    meta["system"] = is_system_board_slug(slug)
     meta["db_path"] = str(kanban_db_path(slug))
     return meta
 

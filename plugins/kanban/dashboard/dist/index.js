@@ -508,6 +508,8 @@
     const { t } = useI18n();
     const [board, setBoard] = useState(() => readSelectedBoard() || null);
     const [boardList, setBoardList] = useState([]);      // [{slug, name, counts, ...}]
+    const [showSystemBoards, setShowSystemBoards] = useState(false);
+    const [hiddenSystemCount, setHiddenSystemCount] = useState(0);
     const [showNewBoard, setShowNewBoard] = useState(false);
     const [showBoardSettings, setShowBoardSettings] = useState(false);
 
@@ -585,11 +587,15 @@
 
     // --- load list of boards for the switcher ------------------------------
     const loadBoardList = useCallback(function () {
-      return SDK.fetchJSON(withBoard(`${API}/boards`, board))
+      const request = showSystemBoards
+        ? SDK.fetchJSON(withBoard(`${API}/boards?include_system=true`, board))
+        : SDK.fetchJSON(withBoard(`${API}/boards`, board));
+      return request
         .then(function (data) {
           const boards = (data && data.boards) || [];
           const storedBoard = readSelectedBoard();
           setBoardList(boards);
+          setHiddenSystemCount((data && data.hidden_system_count) || 0);
           if (!storedBoard && !board && data && data.current) {
             setBoard(data.current);
             return;
@@ -603,7 +609,7 @@
           }
         })
         .catch(function () { /* non-fatal */ });
-    }, [board]);
+    }, [board, showSystemBoards]);
 
     useEffect(function () { loadBoardList(); }, [loadBoardList]);
 
@@ -1047,6 +1053,11 @@
         h(BoardSwitcher, {
           board: board,
           boardList: boardList,
+          showSystemBoards: showSystemBoards,
+          hiddenSystemCount: hiddenSystemCount,
+          onToggleSystemBoards: function () {
+            setShowSystemBoards(function (visible) { return !visible; });
+          },
           onSwitch: switchBoard,
           onNewClick: function () { setShowNewBoard(true); },
           onSettingsClick: function () { setShowBoardSettings(true); },
@@ -1844,7 +1855,8 @@
     // task (so the user can discover multi-project before they need it)
     // OR when any non-default board exists.
     const totalAcrossAllBoards = list.reduce(function (n, b) { return n + (b.total || 0); }, 0);
-    const shouldShow = hasMultipleBoards || totalAcrossAllBoards > 0;
+    const shouldShow = hasMultipleBoards || totalAcrossAllBoards > 0
+      || props.hiddenSystemCount > 0 || props.showSystemBoards;
     if (!shouldShow) {
       return h("div", {
         className: "hermes-kanban-boardswitcher-compact",
@@ -1890,6 +1902,18 @@
           ),
         ),
         h("div", { className: "flex-1" }),
+        (props.hiddenSystemCount > 0 || props.showSystemBoards)
+          ? h(Button, {
+            onClick: props.onToggleSystemBoards,
+            size: "sm",
+            className: "h-8",
+            title: props.showSystemBoards
+              ? "Hide technical delegate_task history boards"
+              : "Show technical delegate_task history boards",
+          }, props.showSystemBoards
+            ? "Hide delegations"
+            : `Show delegations (${props.hiddenSystemCount})`)
+          : null,
         h(DocsLink, null),
         h(Button, {
           onClick: props.onSettingsClick,

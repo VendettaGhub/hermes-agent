@@ -2025,16 +2025,34 @@ def _default_workspace_kind(board: dict[str, Any]) -> str:
 
 
 @router.get("/boards")
-def list_boards(include_archived: bool = Query(False)):
-    """Return every board on disk with task counts and the active slug."""
-    boards = kanban_db.list_boards(include_archived=include_archived)
+def list_boards(
+    include_archived: bool = Query(False),
+    include_system: bool = Query(
+        False,
+        description="Include technical runtime boards such as delegation traces",
+    ),
+):
+    """Return user-facing boards with task counts and the active slug."""
+    all_boards = kanban_db.list_boards(include_archived=include_archived)
+    hidden_system_count = sum(
+        1 for board in all_boards if board.get("system", False)
+    )
+    boards = (
+        all_boards
+        if include_system
+        else [board for board in all_boards if not board.get("system", False)]
+    )
     current = kanban_db.get_current_board()
     for b in boards:
         b["is_current"] = (b["slug"] == current)
         b["counts"] = _board_counts(b["slug"])
         b["total"] = sum(b["counts"].values())
         b["default_workspace_kind"] = _default_workspace_kind(b)
-    return {"boards": boards, "current": current}
+    return {
+        "boards": boards,
+        "current": current,
+        "hidden_system_count": 0 if include_system else hidden_system_count,
+    }
 
 
 def _validate_workdir(raw: str) -> str:

@@ -493,6 +493,29 @@ class TestCLI:
         assert slugs == ["default"]
         assert data[0]["is_current"] is True
 
+    def test_boards_list_hides_delegation_boards_unless_requested(self, tmp_path):
+        env = {"HERMES_HOME": str(tmp_path)}
+        assert _cli(
+            ["boards", "create", "delegation-abcdef123456"], env_extra=env
+        ).returncode == 0
+        assert _cli(
+            ["boards", "create", "delegation-not-a-runtime-id"], env_extra=env
+        ).returncode == 0
+
+        visible = _cli(["boards", "list", "--json"], env_extra=env)
+        assert visible.returncode == 0, visible.stderr
+        visible_slugs = [b["slug"] for b in json.loads(visible.stdout)]
+        assert "delegation-abcdef123456" not in visible_slugs
+        assert "delegation-not-a-runtime-id" in visible_slugs
+
+        all_system = _cli(
+            ["boards", "list", "--json", "--include-system"], env_extra=env
+        )
+        assert all_system.returncode == 0, all_system.stderr
+        boards = {b["slug"]: b for b in json.loads(all_system.stdout)}
+        assert boards["delegation-abcdef123456"]["system"] is True
+        assert boards["delegation-not-a-runtime-id"]["system"] is False
+
     def test_boards_create_and_switch(self, tmp_path):
         env = {"HERMES_HOME": str(tmp_path)}
         r1 = _cli(
