@@ -22,6 +22,11 @@ const electronNative: TestProjectConfiguration = {
 
 export default defineConfig({
   test: {
+    // Native Windows runners report enough logical CPUs for Vitest to spawn 16
+    // JSDOM workers, but transform/import contention then starves otherwise
+    // fast UI tests past the default 5s timeout. Eight keeps the suite parallel
+    // without turning machine load into false Billing/Skills failures.
+    maxWorkers: process.platform === 'win32' ? 8 : undefined,
     projects: [reactUi, electronNative]
   }
 })

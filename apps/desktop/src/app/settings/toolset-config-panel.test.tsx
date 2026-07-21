@@ -590,8 +590,8 @@ describe('ToolsetConfigPanel', () => {
       render(<ToolsetConfigPanel onConfiguredChange={vi.fn()} toolset="browser" />)
 
       await screen.findByText('Local Browser')
-      expect(screen.getByText('Installed')).toBeTruthy()
-      expect(screen.getByRole('button', { name: /Re-run setup/ })).toBeTruthy()
+      expect(await screen.findByText('Installed')).toBeTruthy()
+      expect(await screen.findByRole('button', { name: /Re-run setup/ })).toBeTruthy()
       expect(screen.queryByRole('button', { name: /^Run setup$/ })).toBeNull()
     })
 
